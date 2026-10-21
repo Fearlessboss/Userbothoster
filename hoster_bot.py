@@ -65,7 +65,7 @@ logging.basicConfig(
 session_locks = {}
 
 # Bot token for the hoster bot
-bot_token = "7387414294:AAGbTNiTHVSsnCXj0slg--7RDe0ldnRjk3g"
+bot_token = "8581573607:AAGnhQJRr1pp9qjj_f9xG4Dz1SDf4slWX94"
 api_id = 25770896
 api_hash = "b3a85ada49f9eb19c7d9ab50527c131d"
 
