@@ -65,7 +65,7 @@ logging.basicConfig(
 session_locks = {}
 
 # Bot token for the hoster bot
-bot_token = "8581573607:AAGnhQJRr1pp9qjj_f9xG4Dz1SDf4slWX94"
+bot_token = "7387414294:AAGbTNiTHVSsnCXj0slg--7RDe0ldnRjk3g"
 api_id = 25770896
 api_hash = "b3a85ada49f9eb19c7d9ab50527c131d"
 
@@ -1473,316 +1473,693 @@ async def set_dp(event):
         await event.reply(f"Error Saving Photo: {e}")
         logging.error(f"Error saving photo for user {event.sender_id}: {e}")
 
-# Commands list handler
-@client.on(events.NewMessage(pattern="/commands"))
+import logging
+import re
+from html import escape
+
+from telethon import Button, events
+from telethon.errors import MessageNotModifiedError, RPCError
+
+
+# ============================================================
+# COMMAND HELP CONFIGURATION
+# ============================================================
+# Saari command information ek hi registry mein rakhi gayi hai.
+# Menu aur detail pages isi registry ko use karte hain, isliye
+# dono jagah commands alag-alag update karne ki zarurat nahi hai.
+#
+# IMPORTANT:
+# Ye section sirf commands ka help menu display karta hai.
+# Actual commands execute karne wale handlers alag se required hain.
+# ============================================================
+
+COMMANDS_LOGGER = logging.getLogger(__name__)
+
+COMMANDS_PER_ROW = 3
+COMMANDS_BACK_DATA = b"back_to_commands"
+COMMANDS_TUTORIAL_URL = "https://t.me/USERBOTCOMMANDS/4"
+
+
+def _help_command(usage, description, example, note=None):
+    """Har command ke liye consistent help structure return kare."""
+    return {
+        "usage": usage,
+        "description": description,
+        "example": example,
+        "note": note,
+    }
+
+
+COMMAND_HELP = {
+    "spam": {
+        "name": "Spam",
+        "emoji": "📨",
+        "commands": [
+            _help_command(
+                ".spam <count> [chatid] <message> [@username]",
+                "Ek message ko specified count ke according repeat kare.",
+                ".spam 5 @username Hello!",
+                "Sirf permission wale chats mein use karein.",
+            ),
+            _help_command(
+                ".stopspam [id]",
+                "Running spam task ko stop kare.",
+                ".stopspam 123",
+            ),
+        ],
+    },
+    "timed_spam": {
+        "name": "Timed Spam",
+        "emoji": "⏲️",
+        "commands": [
+            _help_command(
+                ".tspam <time> [chatid/@username] <count> <message>",
+                "Messages ke beech specified delay ke saath repeat kare.",
+                ".tspam 1 @username 5 Test",
+                "Delay ki unit actual .tspam handler ke according hogi.",
+            ),
+            _help_command(
+                ".stopspam [id]",
+                "Running timed-spam task ko stop kare.",
+                ".stopspam 456",
+            ),
+        ],
+    },
+    "raid": {
+        "name": "Raid",
+        "emoji": "💥",
+        "commands": [
+            _help_command(
+                ".raid <count> [chatid] [@username]",
+                "Configured raid messages ka sequence start kare.",
+                ".raid 10 @username",
+                "Harassment ya bina permission targeting ke liye use na karein.",
+            ),
+            _help_command(
+                ".stopraid [id]",
+                "Running raid task ko stop kare.",
+                ".stopraid 789",
+            ),
+        ],
+    },
+    "abusive_raid": {
+        "name": "Abusive Raid",
+        "emoji": "🔥",
+        "commands": [
+            _help_command(
+                ".araid <count> [message_link]",
+                "Reply kiye hue message ya message link par configured "
+                "raid lines bheje.",
+                ".araid 10 https://t.me/c/123456789/123",
+                "Existing implementation ke mutabik stop karne ke liye "
+                "/restart use hota hai. Harassment ke liye use na karein.",
+            ),
+        ],
+    },
+    "shayari_raid": {
+        "name": "Shayari Raid",
+        "emoji": "💌",
+        "commands": [
+            _help_command(
+                ".sraid <count> [username/userid]",
+                "Selected user ke liye shayari messages bheje. "
+                "User ke message par reply karke bhi use kar sakte hain.",
+                ".sraid 5 @username",
+            ),
+            _help_command(
+                ".stopsraid",
+                "Running shayari task ko stop kare.",
+                ".stopsraid",
+            ),
+        ],
+    },
+    "reply_raid": {
+        "name": "Reply Raid",
+        "emoji": "🎯",
+        "commands": [
+            _help_command(
+                ".replyraid [username/userid]",
+                "Selected user ke reply ya mention par configured "
+                "automatic raid response enable kare. "
+                "Target ke message par reply karke bhi use kar sakte hain.",
+                ".replyraid @username",
+                "Harassment ya unwanted targeting ke liye use na karein.",
+            ),
+            _help_command(
+                ".dreplyraid [username/userid]",
+                "Selected user ke liye reply raid disable kare.",
+                ".dreplyraid @username",
+            ),
+        ],
+    },
+    "tagging": {
+        "name": "Tagging",
+        "emoji": "🔔",
+        "commands": [
+            _help_command(
+                ".tagall",
+                "Group members ko mention karne ka task start kare.",
+                ".tagall",
+                "Group permission aur Telegram limits apply hoti hain.",
+            ),
+            _help_command(
+                ".stoptagall [id]",
+                "Running member-tagging task ko stop kare.",
+                ".stoptagall 101",
+            ),
+        ],
+    },
+    "welcome": {
+        "name": "Welcome",
+        "emoji": "🎉",
+        "commands": [
+            _help_command(
+                ".setwlcm <message>",
+                "New members ke liye custom welcome message set kare.",
+                ".setwlcm Welcome to our group!",
+            ),
+            _help_command(
+                ".stopwlcm",
+                "Welcome messages disable kare.",
+                ".stopwlcm",
+            ),
+            _help_command(
+                ".wlcmmssg",
+                "Welcome configuration ko existing handler ke "
+                "default/reset behaviour par restore kare.",
+                ".wlcmmssg",
+            ),
+        ],
+    },
+    "moderation": {
+        "name": "Moderation",
+        "emoji": "🚫",
+        "commands": [
+            _help_command(
+                ".ban @username [reason]",
+                "User ko group se ban kare.",
+                ".ban @username Spamming",
+                "Required admin permissions honi chahiye.",
+            ),
+            _help_command(
+                ".unban @username",
+                "Previously banned user ka ban remove kare.",
+                ".unban @username",
+            ),
+            _help_command(
+                ".mute @username [time(s/m/h/d)] [reason]",
+                "User ki messaging permission restrict kare. "
+                "s = seconds, m = minutes, h = hours, d = days.",
+                ".mute @username 1h Spamming",
+            ),
+            _help_command(
+                ".unmute @username",
+                "Muted user ki messaging permission restore kare.",
+                ".unmute @username",
+            ),
+            _help_command(
+                ".kick @username [reason]",
+                "User ko current group se remove kare.",
+                ".kick @username Disruptive behaviour",
+            ),
+            _help_command(
+                ".clear <count>",
+                "Specified number of messages delete kare.",
+                ".clear 10",
+                "Deletion permissions aur Telegram restrictions apply hoti hain.",
+            ),
+            _help_command(
+                ".rmall",
+                "Existing handler ke mutabik group members ko bulk remove kare.",
+                ".rmall",
+                "Destructive action: group owner ki explicit permission "
+                "ke bina use na karein.",
+            ),
+            _help_command(
+                "/invall <group_link/@username>",
+                "Source group/channel ke members ko current chat mein "
+                "add karne ka attempt kare.",
+                "/invall @PublicGroup",
+                "Admin permissions, user privacy, consent aur Telegram "
+                "limits apply hoti hain; sab members add hona guaranteed nahi hai.",
+            ),
+            _help_command(
+                ".add @username1 [@username2 ...]",
+                "Ek ya multiple users ko current group mein add kare.",
+                ".add @User1 @User2",
+                "User privacy settings aur required permissions apply hoti hain.",
+            ),
+        ],
+    },
+    "fun": {
+        "name": "Fun",
+        "emoji": "😂",
+        "commands": [
+            _help_command(
+                ".joke",
+                "Random Hindi joke display kare.",
+                ".joke",
+            ),
+            _help_command(
+                ".flip",
+                "Coin toss ka result display kare.",
+                ".flip",
+            ),
+            _help_command(
+                ".roll <number>",
+                "Specified number ke according random roll generate kare.",
+                ".roll 6",
+            ),
+            _help_command(
+                ".rps rock|paper|scissors",
+                "Rock, paper, scissors game play kare.",
+                ".rps rock",
+            ),
+            _help_command(
+                ".calc <expression>",
+                "Mathematical expression calculate kare.",
+                ".calc 2 + 3",
+            ),
+        ],
+    },
+    "customization": {
+        "name": "Customization",
+        "emoji": "✍️",
+        "commands": [
+            _help_command(
+                ".stylish <name>",
+                "Diye gaye text/name ke stylish variations generate kare.",
+                ".stylish Aditya",
+            ),
+            _help_command(
+                ".changeowner @username",
+                "Ping message mein display hone wala owner username change kare.",
+                ".changeowner @NewOwner",
+                "Ye help entry sirf ping display customization describe "
+                "karti hai; account ownership transfer nahi.",
+            ),
+            _help_command(
+                ".setemoji <emoji>",
+                "Ping message mein display hone wala custom emoji set kare.",
+                ".setemoji ⚡",
+                "Emoji command ke baad space dekar likhein.",
+            ),
+            _help_command(
+                ".setemoji off",
+                "Ping message se custom emoji remove kare.",
+                ".setemoji off",
+            ),
+        ],
+    },
+    "cloning": {
+        "name": "Profile Clone",
+        "emoji": "👤",
+        "commands": [
+            _help_command(
+                ".clone [username]",
+                "Selected user's profile ko clone karne wala existing "
+                "handler run kare. Username dein ya user ke message "
+                "par reply karke command bhejein.",
+                ".clone @username\n.clone  (user ke message par reply karke)",
+                "Sirf apne ya permission wale profile par use karein. "
+                "Kaunse profile fields copy honge, ye actual handler "
+                "par depend karta hai.",
+            ),
+            _help_command(
+                ".dclone",
+                "Clone se pehle saved original profile restore kare.",
+                ".dclone",
+                "Restore tabhi possible hai jab actual clone handler "
+                "ne original profile ka backup save kiya ho.",
+            ),
+        ],
+    },
+    "general": {
+        "name": "General",
+        "emoji": "ℹ️",
+        "commands": [
+            _help_command(
+                ".ping",
+                "Userbot ka response time check kare.",
+                ".ping",
+            ),
+            _help_command(
+                ".uptime",
+                "Userbot ka running duration display kare.",
+                ".uptime",
+            ),
+            _help_command(
+                ".info [@username]",
+                "User ya chat ki available information display kare.",
+                ".info @username",
+            ),
+            _help_command(
+                ".logout",
+                "Userbot account/session se logout kare.",
+                ".logout",
+                "Logout ke baad dobara login ki zarurat ho sakti hai.",
+            ),
+        ],
+    },
+    "admin": {
+        "name": "Admin",
+        "emoji": "🔧",
+        "commands": [
+            _help_command(
+                ".addsudo @username",
+                "Trusted user ko sudo access de.",
+                ".addsudo @username",
+                "Owner-only command. Sirf trusted users ko access dein.",
+            ),
+            _help_command(
+                ".rmsudo @username",
+                "User ka sudo access remove kare.",
+                ".rmsudo @username",
+            ),
+            _help_command(
+                ".activeusers",
+                "Active userbot users/sessions ki available list display kare.",
+                ".activeusers",
+            ),
+        ],
+    },
+    "save_disappearing": {
+        "name": "Save Disappearing",
+        "emoji": "💾",
+        "commands": [
+            _help_command(
+                ".sd",
+                "Replied message/media ko Saved Messages mein save "
+                "karne wala existing handler run kare.",
+                ".sd  (supported message par reply karke)",
+                "Sender ki permission aur privacy respect karein. "
+                "Protected ya disappearing media save hona guaranteed nahi hai.",
+            ),
+        ],
+    },
+    "broadcast": {
+        "name": "Broadcast",
+        "emoji": "📢",
+        "commands": [
+            _help_command(
+                ".broadcast <message>",
+                "Configured groups mein announcement bheje, "
+                "jahan messaging allowed ho.",
+                ".broadcast Hello everyone!",
+                "Sirf authorized groups mein use karein. Telegram "
+                "rate limits aur chat permissions apply hoti hain.",
+            ),
+        ],
+    },
+    "antisafe": {
+        "name": "AntiSafe",
+        "emoji": "🛡️",
+        "commands": [
+            _help_command(
+                ".antisafe on",
+                "Unapproved incoming DMs ke liye automatic "
+                "deletion/protection enable kare.",
+                ".antisafe on",
+                "Exact deletion behaviour existing AntiSafe handler "
+                "par depend karta hai.",
+            ),
+            _help_command(
+                ".antisafe off",
+                "AntiSafe protection disable kare.",
+                ".antisafe off",
+            ),
+        ],
+    },
+    "approve": {
+        "name": "Approve",
+        "emoji": "✅",
+        "commands": [
+            _help_command(
+                ".approve",
+                "Current DM ke user ko AntiSafe deletion se exempt kare.",
+                ".approve  (user ke private chat mein)",
+            ),
+        ],
+    },
+    "craid": {
+        "name": "CRAID",
+        "emoji": "⚡",
+        "commands": [
+            _help_command(
+                ".craid <count>",
+                "Configured personal channel ke messages se "
+                "reply-based raid task start kare.",
+                ".craid 50  (target message par reply karke)",
+                "Sirf permission wale chats mein use karein.",
+            ),
+            _help_command(
+                ".setraid <channel_link>",
+                "CRAID messages ke liye source channel set kare.",
+                ".setraid https://t.me/+abc123",
+                "Source channel ka access required hai.",
+            ),
+        ],
+    },
+    "autoreply": {
+        "name": "AutoReply",
+        "emoji": "🤖",
+        "commands": [
+            _help_command(
+                ".autoreply <message>",
+                "Username mention/@tag hone par custom automatic "
+                "reply enable kare.",
+                ".autoreply Abhi busy hoon, thodi der mein reply karunga.",
+                "Is feature ka intended trigger @mention hai; "
+                "normal replies aur PMs nahi.",
+            ),
+            _help_command(
+                ".dautoreply",
+                "Mention-based automatic replies disable kare.",
+                ".dautoreply",
+            ),
+        ],
+    },
+    "nuclear_clear": {
+        "name": "Nuclear Clear",
+        "emoji": "☢️",
+        "commands": [
+            _help_command(
+                ".clearall",
+                "Bulk history-clearing operation ka confirmation "
+                "flow start kare.",
+                ".clearall",
+                "Destructive operation. Actual scope account access, "
+                "Telegram permissions aur existing handler par depend karta hai.",
+            ),
+            _help_command(
+                ".clearall confirm",
+                "Pending history-clearing operation confirm kare.",
+                ".clearall confirm",
+                "Deleted data recover na ho sake. Confirmation sirf "
+                "help text mein nahi, actual handler mein enforce honi chahiye.",
+            ),
+        ],
+    },
+}
+
+
+# ============================================================
+# MENU / DETAIL RENDERERS
+# ============================================================
+
+def _build_commands_keyboard():
+    """Stable callback IDs ke saath three-column keyboard banaye."""
+    buttons = [
+        Button.inline(
+            f"{group['emoji']} {group['name']}",
+            data=f"cmd_{group_id}".encode("utf-8"),
+        )
+        for group_id, group in COMMAND_HELP.items()
+    ]
+
+    return [
+        buttons[index:index + COMMANDS_PER_ROW]
+        for index in range(0, len(buttons), COMMANDS_PER_ROW)
+    ]
+
+
+def _build_commands_menu():
+    """Initial menu aur Back button ke liye same content return kare."""
+    command_count = sum(
+        len(group["commands"])
+        for group in COMMAND_HELP.values()
+    )
+
+    return (
+        "✨ <b>𝐔sᴇʀʙᴏᴛ 𝐂ᴏᴍᴍᴀɴᴅs - 𝐏ʀᴇᴍɪᴜᴍ!<b> ✨\n\n"
+        "💬 *𝐂ʟɪᴄᴋ ᴀ 𝐁ᴏx 𝐓ᴏ 𝐄xᴘʟᴏʀᴇ 𝐂ᴏᴍᴍᴀɴᴅs!* 💬\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📂 <b>Categories:</b> {len(COMMAND_HELP)}\n"
+        f"⌨️ <b>Command entries:</b> {command_count}\n\n"
+        "📖 <b>Syntax guide</b>\n"
+        "<code>&lt;value&gt;</code> — Required argument\n"
+        "<code>[value]</code> — Optional argument\n"
+        "<code>a|b</code> — Available options mein se ek\n\n"
+        f'🎓 <a href="{escape(COMMANDS_TUTORIAL_URL, quote=True)}">'
+        "Full Command Tutorial</a>\n\n"
+        "🔹 <b>Select a category below</b>"
+    )
+
+
+def _build_command_details(group):
+    """Har command ko same readable format mein render kare."""
+    sections = [
+        f"{group['emoji']} <b>{escape(group['name'])} — Commands</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    for index, command in enumerate(group["commands"], start=1):
+        section = (
+            f"<b>{index}. Command</b>\n"
+            f"<code>{escape(command['usage'])}</code>\n\n"
+            f"📝 <b>Explanation</b>\n"
+            f"{escape(command['description'])}\n\n"
+            f"💡 <b>Example</b>\n"
+            f"<pre>{escape(command['example'])}</pre>"
+        )
+
+        if command.get("note"):
+            section += (
+                "\n\n⚠️ <b>Note</b>\n"
+                f"{escape(command['note'])}"
+            )
+
+        sections.append(section)
+
+    sections.append(
+        "↩️ Categories par wapas jaane ke liye Back button dabayein."
+    )
+
+    # HTML escaping ki wajah se <count>, &, usernames aur examples
+    # Telegram formatting ko accidentally break nahi karenge.
+    return "\n\n".join(sections)
+
+
+# Sirf apne menu callbacks handle karein.
+# Isse script ke doosre callback handlers unnecessarily match nahi honge.
+_COMMAND_HELP_CALLBACK_PATTERN = re.compile(
+    rb"^(?:back_to_commands|cmd_(?:"
+    + b"|".join(
+        re.escape(group_id.encode("utf-8"))
+        for group_id in COMMAND_HELP
+    )
+    + rb"))$"
+)
+
+
+# ============================================================
+# /commands HANDLER
+# ============================================================
+
+# /commands aur /commands@BotUsername support kare.
+# /commandsXYZ jaise unrelated messages match nahi honge.
+@client.on(
+    events.NewMessage(
+        pattern=r"(?i)^/commands(?:@[a-z0-9_]+)?\s*$"
+    )
+)
 async def commands(event):
     if await check_blocked_user(event):
         return
-    command_groups = [
-    {"name": "Spam", "emoji": "📨", "main_cmd": ".spam <count> [chatid] <message> [@username]", "main_desc": "Spam a message multiple times.", "main_example": ".spam 5 @username Hello!"},
-    {"name": "Timed Spam", "emoji": "⏲️", "main_cmd": ".tspam <time> [chatid/@username] <count> <message>", "main_desc": "Spam with a time delay.", "main_example": ".tspam 1 @username 5 Test"},
-    {"name": "Raid", "emoji": "💥", "main_cmd": ".raid <count> [chatid] [@username]", "main_desc": "Raid with abusive messages.", "main_example": ".raid 10 @username"},
-    {"name": "Abusive Raid", "emoji": "🔥", "main_cmd": ".araid <count> [message_link]", "main_desc": "Send abusive words line-by-line in reply to a message or link. To stop, restart bot with /restart.", "main_example": ".araid 10 https://t.me/c/123456789/123"},
-    {"name": "Shayari Raid", "emoji": "💌", "main_cmd": ".sraid <count> [username/userid/reply to user]", "main_desc": "Send romantic shayari messages.", "main_example": ".sraid 5 @username"},
-    {"name": "Reply Raid", "emoji": "🎯", "main_cmd": ".replyraid [username/userid/reply to user]", "main_desc": "Auto-reply with abusive messages when a user replies or tags you.", "main_example": ".replyraid @username"},
-    {"name": "Tagging", "emoji": "🔔", "main_cmd": ".tagall", "main_desc": "Tag all group members.", "main_example": ".tagall"},
-    {"name": "Welcome", "emoji": "🎉", "main_cmd": ".setwlcm <message>", "main_desc": "Set custom welcome message.", "main_example": ".setwlcm Welcome!"},
-    {
-        "name": "Moderation",
-        "emoji": "🚫",
-        "main_cmd": ".ban @username [reason]",
-        "main_desc": "Ban a user (admin only).",
-        "main_example": ".ban @username Spamming"
-    },
-    {"name": "Fun", "emoji": "😂", "main_cmd": ".joke", "main_desc": "Get a random Hindi joke.", "main_example": ".joke"},
-    {"name": "Customization", "emoji": "✍️", "main_cmd": ".stylish <name>", "main_desc": "Generate stylish names.", "main_example": ".stylish Aditya"},
-    {"name": "General", "emoji": "ℹ️", "main_cmd": ".ping", "main_desc": "Check bot speed.", "main_example": ".ping"},
-    {"name": "Admin", "emoji": "🔧", "main_cmd": ".addsudo @username", "main_desc": "Add a sudo user (owner only).", "main_example": ".addsudo @username"},
-    {"name": "Save Disappearing", "emoji": "💾", "main_cmd": ".sd", "main_desc": "Save a disappearing message to Saved Messages.", "main_example": ".sd (reply to a disappearing message)"},
-    {"name": "Broadcast", "emoji": "📢", "main_cmd": ".broadcast <message>", "main_desc": "Broadcast a message to all groups.", "main_example": ".broadcast Hello!"},
-    {"name": "AntiSafe", "emoji": "🛡️", "main_cmd": ".antisafe on/off", "main_desc": "Auto delete all incoming DMs (except approved)", "main_example": ".antisafe on"},
-    {"name": "Approve", "emoji": "✅", "main_cmd": ".approve", "main_desc": "Make any user immune to AntiSafe", "main_example": "Go to user's DM → .approve"},   
-    {"name": "CRAID", "emoji": "⚡", "main_cmd": ".craid <count> (reply)", "main_desc": "Super fast personal raid from your channel", "main_example": "Reply karke .craid 50"},
-    {"name": "AutoReply", "emoji": "🤖", "main_cmd": ".autoreply <message>", "main_desc": "Auto reply sirf @tag pe (reply/PM pe nahi)", "main_example": ".autoreply kaisa hai bro"},
-    {"name": "Nuclear Clear", "emoji": "☢️", "main_cmd": ".clearall", "main_desc": "PURA HISTORY DELETE (left groups bhi) — SAB KUCH SAFF!", "main_example": ".clearall → .clearall confirm"}
-    ]
-    buttons = []
-    row = []
-    for group in command_groups:
-        row.append(Button.inline(f"{group['emoji']} {group['name']}", data=f"cmd_{group['name'].lower().replace(' ', '_')}"))
-        if len(row) == 3:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    await event.reply(
-        "✨ **𝐔sᴇʀʙᴏᴛ 𝐂ᴏᴍᴍᴀɴᴅs - 𝐏ʀᴇᴍɪᴜᴍ!** ✨\n\n"
-        "💬 *𝐂ʟɪᴄᴋ ᴀ 𝐁ᴏx 𝐓ᴏ 𝐄xᴘʟᴏʀᴇ 𝐂ᴏᴍᴍᴀɴᴅs!* 💬\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "𝐅ᴜʟʟ 𝐓ᴜᴛᴏʀɪᴀʟ 𝐁ᴏᴛ 𝐂ᴍᴅs - t.me/ZUDO_USERBOT/2\n\n"
-        "🔹 **𝐂ʜᴏᴏsᴇ ᴀ 𝐅ᴇᴀᴛᴜʀᴇ** 🔹\n", parse_mode='md', buttons=buttons
-    )
-    logging.info(f"Sent commands menu to user {event.sender_id}")
 
-# Callback query handler for command details
-@client.on(events.CallbackQuery)
+    try:
+        await event.reply(
+            _build_commands_menu(),
+            parse_mode="html",
+            buttons=_build_commands_keyboard(),
+            link_preview=False,
+        )
+    except RPCError:
+        COMMANDS_LOGGER.exception(
+            "Failed to send commands menu: sender_id=%s chat_id=%s",
+            event.sender_id,
+            event.chat_id,
+        )
+        return
+
+    COMMANDS_LOGGER.info(
+        "Commands menu sent: sender_id=%s chat_id=%s",
+        event.sender_id,
+        event.chat_id,
+    )
+
+
+# ============================================================
+# COMMAND DETAILS / BACK BUTTON HANDLER
+# ============================================================
+
+@client.on(
+    events.CallbackQuery(
+        pattern=_COMMAND_HELP_CALLBACK_PATTERN
+    )
+)
 async def handle_command_details(event):
     if await check_blocked_user(event):
         return
-    callback_data = event.data.decode('utf-8')
-    command_groups = {
-        'cmd_spam': {
-            "name": "Spam 📨",
-            "main_cmd": ".spam <count> [chatid] <message> [@username]",
-            "main_desc": "Spam a message multiple times.",
-            "main_example": ".spam 5 @username Hello!",
-            "related_cmds": [{"cmd": ".stopspam [id]", "desc": "Stop spam.", "example": ".stopspam 123"}]
-        },
-        'cmd_timed_spam': {
-            "name": "Timed Spam ⏲️",
-            "main_cmd": ".tspam <time> [chatid/@username] <count> <message>",
-            "main_desc": "Spam with a time delay.",
-            "main_example": ".tspam 1 @username 5 Test",
-            "related_cmds": [{"cmd": ".stopspam [id]", "desc": "Stop timed spam.", "example": ".stopspam 456"}]
-        },
-        'cmd_raid': {
-            "name": "Raid 💥",
-            "main_cmd": ".raid <count> [chatid] [@username]",
-            "main_desc": "Raid with abusive messages.",
-            "main_example": ".raid 10 @username",
-            "related_cmds": [{"cmd": ".stopraid [id]", "desc": "Stop raid.", "example": ".stopraid 789"}]
-        },
-        'cmd_abusive_raid': {
-            "name": "Abusive Raid 🔥",
-            "main_cmd": ".araid",
-            "main_desc": "Send abusive words line-by-line in reply to a message or link. To stop, restart bot with /restart.",
-            "usage": ".araid <count> [message_link]",
-            "example": ".araid 10 https://t.me/c/123456789/123",
-            "related_cmds": []
-        },
-        'cmd_shayari_raid': {
-            "name": "Shayari Raid 💌",
-            "main_cmd": ".sraid",
-            "main_desc": "Send romantic shayari messages.",
-            "usage": ".sraid <count> [username/userid/reply to user]",
-            "example": ".sraid 5 @username",
-            "related_cmds": [{"cmd": ".stopsraid", "desc": "Stop shayari raid.", "usage": ".stopsraid", "example": ".stopsraid"}]
-        },
-        'cmd_reply_raid': {
-            "name": "Reply Raid 🎯",
-            "main_cmd": ".replyraid",
-            "main_desc": "Auto-reply with abusive messages when a user replies or tags you.",
-            "usage": ".replyraid [username/userid/reply to user]",
-            "example": ".replyraid @username",
-            "related_cmds": [
-                {"cmd": ".dreplyraid", "desc": "Deactivate reply raid.", "usage": ".dreplyraid [username/userid/reply to user]", "example": ".dreplyraid @username"}
-            ]
-        },
-        'cmd_tagging': {
-            "name": "Tagging 🔔",
-            "main_cmd": ".tagall",
-            "main_desc": "Tag all group members.",
-            "main_example": ".tagall",
-            "related_cmds": [{"cmd": ".stoptagall [id]", "desc": "Stop tagall.", "example": ".stoptagall 101"}]
-        },
-        'cmd_welcome': {
-            "name": "Welcome 🎉",
-            "main_cmd": ".setwlcm <message>",
-            "main_desc": "Set custom welcome message.",
-            "main_example": ".setwlcm Welcome!",
-            "related_cmds": [
-                {"cmd": ".stopwlcm", "desc": "Disable welcome.", "example": ".stopwlcm"},
-                {"cmd": ".wlcmmssg", "desc": "Reset welcome.", "example": ".wlcmmssg"}
-            ]
-        },
-        'cmd_moderation': {
-            "name": "Moderation 🚫",
-            "main_cmd": ".ban @username [reason]",
-            "main_desc": "Ban a user (admin only).",
-            "main_example": ".ban @username Spamming",
-            "related_cmds": [
-                {"cmd": ".unban @username", "desc": "Unban a user.", "example": ".unban @username"},
-                {"cmd": ".mute @username [time(s/m/h/d)] [reason]", "desc": "Mute a user.", "example": ".mute @username 1h Spamming"},
-                {"cmd": ".unmute @username", "desc": "Unmute a user.", "example": ".unmute @username"},
-                {"cmd": ".kick @username [reason]", "desc": "Kick a user.", "example": ".kick @username Disruptive"},
-                {"cmd": ".clear <count>", "desc": "Delete messages.", "example": ".clear 10"},
-                {"cmd": ".rmall", "desc": "Remove all members.", "example": ".rmall"},
-                {
-                    "cmd": "/invall <group_link/@username>",
-                    "desc": "Add all members from another group/channel to the current group/channel (admin only).",
-                    "usage": "/invall <private_group_link> | @public_group_username",
-                    "example": "/invall https://t.me/+abc123 | /invall @PublicGroup"
-                },
-                {
-                    "cmd": ".add <@username> [<@username> ...]",
-                    "desc": "Add one or more users to the group by username (admin only).",
-                    "usage": ".add @username1 [@username2 ...]",
-                    "example": ".add @User1 @User2"
-                }
-            ]
-        },
-        'cmd_fun': {
-            "name": "Fun 😂",
-            "main_cmd": ".joke",
-            "main_desc": "Get a random Hindi joke.",
-            "main_example": ".joke",
-            "related_cmds": [
-                {"cmd": ".flip", "desc": "Flip a coin.", "example": ".flip"},
-                {"cmd": ".roll <number>", "desc": "Roll a dice.", "example": ".roll 6"},
-                {"cmd": ".rps rock|paper|scissors", "desc": "Play rock-paper-scissors.", "example": ".rps rock"},
-                {"cmd": ".calc <expression>", "desc": "Calculate.", "example": ".calc 2 + 3"}
-            ]
-        },
-        'cmd_customization': {
-            "name": "Customization ✍️",
-            "main_cmd": ".stylish <name>",
-            "main_desc": "Generate stylish names.",
-            "main_example": ".stylish Aditya",
-            "related_cmds": [{"cmd": ".changeowner @username", "desc": "Change owner in .ping.", "example": ".changeowner @NewOwner"}]
-        },
-        'cmd_general': {
-            "name": "General ℹ️",
-            "main_cmd": ".ping",
-            "main_desc": "Check bot speed.",
-            "main_example": ".ping",
-            "related_cmds": [
-                {"cmd": ".uptime", "desc": "Check uptime.", "example": ".uptime"},
-                {"cmd": ".info [@username]", "desc": "Get user/chat info.", "example": ".info @username"},
-                {"cmd": ".logout", "desc": "Logout userbot.", "example": ".logout"}
-            ]
-        },
-        'cmd_admin': {
-            "name": "Admin 🔧",
-            "main_cmd": ".addsudo @username",
-            "main_desc": "Add a sudo user (owner only).",
-            "main_example": ".addsudo @username",
-            "related_cmds": [
-                {"cmd": ".rmsudo @username", "desc": "Remove sudo user.", "example": ".rmsudo @username"},
-                {"cmd": ".activeusers", "desc": "Show active userbots.", "example": ".activeusers"}
-            ]
-           },
-    'cmd_save_disappearing': {
-        "name": "Save Disappearing 💾",
-        "main_cmd": ".sd",
-        "main_desc": "Save a disappearing message to Saved Messages.",
-        "main_example": ".sd (reply to a disappearing message)",
-        "related_cmds": []
-    },
-    'cmd_broadcast': {
-        "name": "Broadcast ",
-        "main_cmd": ".broadcast <message>",
-        "main_desc": "Broadcast a message to all groups where messaging is allowed.",
-        "main_example": ".broadcast Hello everyone!",
-        "related_cmds": []
-    },
-    # ← YAHAN YE LINE ADD KAR DE
-    'cmd_craid': {
-        "name": "CRAID ",
-        "main_cmd": ".craid <count> (reply)",
-        "main_desc": "Super fast personal raid using messages from your own set channel.",
-        "main_example": "Reply karke .craid 100",
-        "related_cmds": [
-            {"cmd": ".setraid <channel_link>", "desc": "Set your personal raid channel", "example": ".setraid https://t.me/+abc123"}
-        ]
-    },
-    'cmd_antisafe': {
-        "name": "AntiSafe Shield",
-        "main_cmd": ".antisafe on/off",
-        "main_desc": "Turn on/off hardcore DM protection",
-        "main_example": ".antisafe on → All DMs delete\n.antisafe off → Normal",
-        "related_cmds": []
-    },
-    'cmd_approve': {
-        "name": "Approve Checkmark",
-        "main_cmd": ".approve",
-        "main_desc": "Save any user from AntiSafe deletion",
-        "main_example": "User ke DM me jao → .approve likho",
-        "related_cmds": []
-    },
-    'cmd_autoreply': {
-        "name": "AutoReply Robot",
-        "main_cmd": ".autoreply <message>",
-        "main_desc": "Sirf @tag pe automatic reply jayega (reply/PM pe nahi)",
-        "main_example": ".autoreply kaisa hai bhai",
-        "related_cmds": [{"cmd": ".dautoreply", "desc": "Band karne ke liye", "example": ".dautoreply"}]
-    },
-    'cmd_nuclear_clear': {
-        "name": "Nuclear Clear Nuclear",
-        "main_cmd": ".clearall",
-        "main_desc": "Tera pura 5 saal ka Telegram history udaa dega — left groups bhi bina join kiye!",
-        "main_example": ".clearall → .clearall confirm\nEk baar gaya to wapas nahi aayega!",
-        "related_cmds": []
-    }
-}
 
-    if callback_data == "back_to_commands":
-        buttons = []
-        row = []
-        for cmd_key, group in command_groups.items():
-            row.append(Button.inline(f"{group['name'].split(' ')[1]} {group['name'].split(' ')[0]}", data=cmd_key))
-            if len(row) == 3:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        await event.edit(
-        "✨ **𝐔sᴇʀʙᴏᴛ 𝐂ᴏᴍᴍᴀɴᴅs - 𝐏ʀᴇᴍɪᴜᴍ!** ✨\n\n"
-        "💬 *𝐂ʟɪᴄᴋ ᴀ 𝐁ᴏx 𝐓ᴏ 𝐄xᴘʟᴏʀᴇ 𝐂ᴏᴍᴍᴀɴᴅs!* 💬\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "𝐅ᴜʟʟ 𝐓ᴜᴛᴏʀɪᴀʟ 𝐁ᴏᴛ 𝐂ᴍᴅs - t.me/ZUDO_USERBOT/2\n\n"
-        "🔹 **𝐂ʜᴏᴏsᴇ ᴀ 𝐅ᴇᴀᴛᴜʀᴇ** 🔹\n", parse_mode='md', buttons=buttons
-        )
-        logging.info(f"Returned to commands menu for user {event.sender_id}")
-        return
+    callback_data = event.data
 
-    if not callback_data.startswith('cmd_'):
-        return
-
-    group = command_groups.get(callback_data)
-    if not group:
-        await event.answer("Feature not found!", alert=True)
-        return
-
-    if callback_data in ['cmd_shayari_raid', 'cmd_reply_raid', 'cmd_abusive_raid']:
-        response = (
-            f"✨ **{group['name']} Commands** ✨\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔹 **{group['main_cmd']}**\n"
-            f"📝 **Description**: {group['main_desc']}\n"
-            f"💡 **Usage**: `{group['usage']}`\n"
-            f"💡 **Example**: `{group['example']}`\n\n"
-            f"🔗 **Related Commands**:\n"
-        )
-        for rel_cmd in group['related_cmds']:
-            response += (
-                f"➤ **{rel_cmd['cmd']}**\n"
-                f"   📝 **Description**: {rel_cmd['desc']}\n"
-                f"   💡 **Usage**: `{rel_cmd['usage']}`\n"
-                f"   💡 **Example**: `{rel_cmd['example']}`\n"
-            )
+    if callback_data == COMMANDS_BACK_DATA:
+        response = _build_commands_menu()
+        buttons = _build_commands_keyboard()
+        selected_group = "main_menu"
     else:
-        response = (
-            f"✨ **{group['name']} Commands** ✨\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔹 **{group['main_cmd']}**\n"
-            f"📝 **Description**: {group['main_desc']}\n"
-            f"💡 **Example**: `{group['main_example']}`\n\n"
-            f"🔗 **Related Commands**:\n"
-        )
-        for rel_cmd in group['related_cmds']:
-            usage = rel_cmd.get('usage', rel_cmd['example'])
-            response += (
-                f"➤ **{rel_cmd['cmd']}**\n"
-                f"   📝 **Description**: {rel_cmd['desc']}\n"
-                f"   💡 **Usage**: `{usage}`\n"
-                f"   💡 **Example**: `{rel_cmd['example']}`\n"
+        # Pattern matched hone ke baad callback ID known ASCII bytes hai.
+        group_id = callback_data[len(b"cmd_"):].decode("ascii")
+        group = COMMAND_HELP.get(group_id)
+
+        if group is None:
+            await event.answer(
+                "Category available nahi hai. /commands dobara open karein.",
+                alert=True,
             )
+            return
 
-    buttons = [[Button.inline("Back ↩️", data="back_to_commands")]]
-    await event.edit(response, parse_mode='md', buttons=buttons)
-    logging.info(f"Sent command details for {callback_data} to user {event.sender_id}")
+        response = _build_command_details(group)
+        buttons = [[
+            Button.inline(
+                "↩️ Back to Commands",
+                data=COMMANDS_BACK_DATA,
+            )
+        ]]
+        selected_group = group_id
 
-# Sudo list handler
+    try:
+        # Callback acknowledge karne se Telegram ka loading spinner
+        # message edit complete hone ka wait nahi karta.
+        await event.answer()
+
+        await event.edit(
+            response,
+            parse_mode="html",
+            buttons=buttons,
+            link_preview=False,
+        )
+
+    except MessageNotModifiedError:
+        # Same category dobara tap karna normal hai; error log nahi karein.
+        return
+
+    except RPCError:
+        COMMANDS_LOGGER.exception(
+            "Failed to update command help: category=%s sender_id=%s",
+            selected_group,
+            event.sender_id,
+        )
+        return
+
+    COMMANDS_LOGGER.info(
+        "Command help displayed: category=%s sender_id=%s",
+        selected_group,
+        event.sender_id,
+    )
+
+#Sudo list handler
 @client.on(events.NewMessage(pattern="/sudolist"))
 async def sudolist(event):
     if await check_blocked_user(event):
